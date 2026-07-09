@@ -418,14 +418,4 @@ Built by **Kuhyar Saeedi** as a capstone project combining **AI/ML engineering**
 
 ---
 
-## 📧 Support
-
-Questions or issues? 
-- Open a GitHub issue
-- Check API docs at `http://localhost:8000/docs`
-- Review the architecture section above
-
----
-
-**Last Updated:** January 2025  
-**Status:** ✅ MVP Complete | 🚀 Production-Ready (with real SCADA integration)
+**Questions or issues?** Open a GitHub issue or check the API docs at `http://localhost:8000/docs`
