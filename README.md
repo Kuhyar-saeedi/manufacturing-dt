@@ -412,14 +412,6 @@ Built by **Kuhyar Saeedi** as a capstone project combining **AI/ML engineering**
 - MS Management Engineering (Università degli Studi di Roma Tor Vergata)
 - Strong focus on **AI, Machine Learning, and Data Science**
 
-**Relevant Coursework & Achievements:**
-- AI Applications in Manufacturing (30/30 with praise)
-- Digital Economy (29/30)
-- Smart Factories (30/30)
-- Digital Twin Modeling (30/30)
-- Clean Hydrogen Technologies (30/30 with praise)
-- Management of Innovation & Technology (26/30)
-
 **Tech Stack:** Python • FastAPI • Streamlit • SQLite • Plotly • Scikit-learn • XGBoost • PyTorch
 
 **Portfolio:** [GitHub](https://github.com/Kuhyar-saeedi) | [LinkedIn](https://linkedin.com/in/kuhyar)
