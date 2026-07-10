@@ -291,10 +291,19 @@ async def get_factory_status(db: Session = Depends(get_db)):
         timestamp=datetime.now()
     )
 
+@app.get("/sensor-readings", response_model=List[SensorReadingOut])
+async def get_sensor_readings(hours: int = 24, machine_id: str = None, db: Session = Depends(get_db)):
+    """Get raw sensor readings for the last N hours, optionally filtered by machine"""
+    cutoff = datetime.now() - timedelta(hours=hours)
+    query = db.query(SensorReading).filter(SensorReading.timestamp >= cutoff)
+    if machine_id:
+        query = query.filter(SensorReading.machine_id == machine_id)
+    return query.order_by(SensorReading.timestamp.desc()).limit(1000).all()
+
 @app.get("/maintenance-alerts", response_model=List[MaintenanceAlertOut])
 async def get_maintenance_alerts(db: Session = Depends(get_db)):
     """Get all active maintenance alerts"""
-    
+
     alerts = db.query(MaintenanceAlert).filter(MaintenanceAlert.is_active == 1).all()
     return alerts
 
@@ -334,7 +343,23 @@ async def root():
 async def startup_event():
     """Initialize database and load models on startup"""
     print("✅ Manufacturing DT API starting up...")
-    print("📊 Database: SQLite (factory.db)")
+
+    # Auto-seed if database is empty (important for Railway restarts)
+    db = SessionLocal()
+    try:
+        count = db.query(SensorReading).count()
+        if count == 0:
+            print("📊 Database empty — seeding with 48h of synthetic data...")
+            from sensor_simulator import FactorySensorSimulator
+            simulator = FactorySensorSimulator(n_machines=5, n_hours=48)
+            df = simulator.generate_readings()
+            df = simulator.add_anomalies(df)
+            df.to_sql("sensor_readings", engine, if_exists="append", index=False)
+            print(f"✅ Seeded {len(df)} sensor readings")
+        else:
+            print(f"📊 Database ready: {count} readings")
+    finally:
+        db.close()
     print("🤖 ML models: Ready for predictions")
 
 if __name__ == "__main__":

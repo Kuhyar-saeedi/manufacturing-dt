@@ -55,7 +55,7 @@ logs/
 .env.*.local
 
 # Streamlit
-.streamlit/
+.streamlit/secrets.toml
 cache/
 
 # MacOS
