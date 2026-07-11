@@ -20,7 +20,13 @@ st.set_page_config(
 st.title("🚨 Predictive Maintenance Alerts")
 st.markdown("AI-driven equipment failure predictions • Optimize maintenance scheduling")
 
-API_BASE = os.environ.get("API_BASE", "http://localhost:8000")
+def get_api_base() -> str:
+    try:
+        return st.secrets["API_BASE"]
+    except (KeyError, FileNotFoundError):
+        return os.environ.get("API_BASE", "http://localhost:8000")
+
+API_BASE = get_api_base()
 
 # ============================================================================
 # LOAD DATA

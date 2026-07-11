@@ -36,8 +36,14 @@ st.markdown("""
 st.title("🏭 Manufacturing Plant Digital Twin")
 st.markdown("**Real-time monitoring, predictive maintenance & optimization**")
 
-# Read API base from env var; falls back to localhost for local dev
-API_BASE = os.environ.get("API_BASE", "http://localhost:8000")
+# Read API base: Streamlit Cloud secrets → env var → localhost fallback
+def get_api_base() -> str:
+    try:
+        return st.secrets["API_BASE"]
+    except (KeyError, FileNotFoundError):
+        return os.environ.get("API_BASE", "http://localhost:8000")
+
+API_BASE = get_api_base()
 
 # ============================================================================
 # SIDEBAR: FILTERS & NAVIGATION
