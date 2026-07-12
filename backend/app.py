@@ -5,7 +5,9 @@ Handles sensor data ingestion, ML predictions, and optimization
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+import asyncio
 import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime
@@ -181,12 +183,110 @@ class ProductionScheduler:
         return optimized_order, time_saved
 
 # ============================================================================
+# BACKGROUND SENSOR FEED
+# ============================================================================
+
+# Per-machine state for realistic random-walk simulation
+_machine_state = {
+    m: {"temp": 65.0 + np.random.normal(0, 5),
+        "vib":  2.0  + np.random.uniform(0, 1),
+        "power": 15.0 + np.random.normal(0, 2)}
+    for m in ["M1", "M2", "M3", "M4", "M5"]
+}
+
+async def continuous_sensor_feed():
+    """Add one reading per machine every 60 seconds; prune data older than 72 h."""
+    predictor = MaintenancePredictor()
+    while True:
+        await asyncio.sleep(60)
+        db = SessionLocal()
+        try:
+            now = datetime.now()
+            for machine_id, state in _machine_state.items():
+                # Random walk keeps values realistic
+                state["temp"]  = float(np.clip(state["temp"]  + np.random.normal(0, 1.5), 40, 95))
+                state["vib"]   = float(np.clip(state["vib"]   + np.random.normal(0, 0.3), 0.3, 10))
+                state["power"] = float(np.clip(state["power"] + np.random.normal(0, 0.8), 5, 35))
+
+                reading = SensorReading(
+                    machine_id=machine_id,
+                    timestamp=now,
+                    temperature=round(state["temp"], 2),
+                    vibration=round(state["vib"], 3),
+                    power_consumption=round(state["power"], 2),
+                    production_count=int(np.random.randint(5, 20)),
+                    downtime_minutes=float(max(0, np.random.normal(0, 2))),
+                    quality_score=float(np.clip(np.random.normal(92, 5), 70, 100)),
+                )
+                db.add(reading)
+
+                # Create alert if threshold crossed
+                prob, days = predictor.predict_failure_probability(
+                    state["temp"], state["vib"], state["power"]
+                )
+                if prob > 0.6:
+                    db.add(MaintenanceAlert(
+                        machine_id=machine_id,
+                        timestamp=now,
+                        failure_probability=prob,
+                        days_to_failure=days,
+                        recommended_action="Schedule preventive maintenance",
+                    ))
+
+            db.commit()
+
+            # Prune readings older than 72 hours to keep DB lean
+            cutoff = now - timedelta(hours=72)
+            db.query(SensorReading).filter(SensorReading.timestamp < cutoff).delete()
+            db.commit()
+        except Exception as exc:
+            print(f"⚠️  Sensor feed error: {exc}")
+        finally:
+            db.close()
+
+
+def seed_database():
+    """Seed 48 h of synthetic data if no recent readings exist."""
+    db = SessionLocal()
+    try:
+        cutoff = datetime.now() - timedelta(hours=24)
+        recent = db.query(SensorReading).filter(SensorReading.timestamp >= cutoff).count()
+        if recent == 0:
+            print("📊 No recent data — seeding 48 h of synthetic readings...")
+            # Clear stale rows first
+            db.query(SensorReading).delete()
+            db.commit()
+            from sensor_simulator import FactorySensorSimulator
+            simulator = FactorySensorSimulator(n_machines=5, n_hours=48)
+            df = simulator.generate_readings()
+            df = simulator.add_anomalies(df)
+            df.to_sql("sensor_readings", engine, if_exists="append", index=False)
+            print(f"✅ Seeded {len(df)} readings")
+        else:
+            print(f"📊 Database ready: {recent} recent readings")
+    finally:
+        db.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("✅ Manufacturing DT API starting up...")
+    seed_database()
+    print("🤖 ML models: Ready")
+    task = asyncio.create_task(continuous_sensor_feed())
+    yield
+    task.cancel()
+    print("🛑 Sensor feed stopped")
+
+
+# ============================================================================
 # FASTAPI APP SETUP
 # ============================================================================
 
 app = FastAPI(
     title="Manufacturing Digital Twin API",
-    description="Real-time monitoring, predictive maintenance, and optimization"
+    description="Real-time monitoring, predictive maintenance, and optimization",
+    lifespan=lifespan,
 )
 
 # Enable CORS for Streamlit frontend
@@ -335,32 +435,6 @@ async def root():
         "version": "0.1.0"
     }
 
-# ============================================================================
-# STARTUP EVENT
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database and load models on startup"""
-    print("✅ Manufacturing DT API starting up...")
-
-    # Auto-seed if database is empty (important for Railway restarts)
-    db = SessionLocal()
-    try:
-        count = db.query(SensorReading).count()
-        if count == 0:
-            print("📊 Database empty — seeding with 48h of synthetic data...")
-            from sensor_simulator import FactorySensorSimulator
-            simulator = FactorySensorSimulator(n_machines=5, n_hours=48)
-            df = simulator.generate_readings()
-            df = simulator.add_anomalies(df)
-            df.to_sql("sensor_readings", engine, if_exists="append", index=False)
-            print(f"✅ Seeded {len(df)} sensor readings")
-        else:
-            print(f"📊 Database ready: {count} readings")
-    finally:
-        db.close()
-    print("🤖 ML models: Ready for predictions")
 
 if __name__ == "__main__":
     import uvicorn
