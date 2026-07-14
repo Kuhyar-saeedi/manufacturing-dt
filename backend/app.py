@@ -14,6 +14,7 @@ from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 import joblib
 from typing import List, Dict
+from model_utils import compute_features
 
 # ============================================================================
 # DATABASE SETUP
@@ -130,32 +131,52 @@ class SchedulingRecommendationOut(BaseModel):
 # ============================================================================
 
 class MaintenancePredictor:
-    """Predict equipment failure probability"""
-    
+    """Predict equipment failure probability using a trained XGBoost model."""
+
     def __init__(self):
-        # Placeholder: in production, load a trained XGBoost/RandomForest
-        self.model = None
-    
-    def predict_failure_probability(self, 
-                                   temperature: float,
-                                   vibration: float,
-                                   power_consumption: float) -> tuple:
-        """
-        Returns: (failure_probability: 0-1, days_to_failure: float)
-        """
-        # Simple heuristic for now (replace with ML model)
-        # High vibration + high temp = higher failure risk
-        risk_score = (vibration / 10.0) * 0.5 + (temperature / 80.0) * 0.5
-        failure_prob = min(risk_score, 1.0)
-        
-        # Estimate days to failure (rough inverse relationship)
-        if failure_prob > 0.7:
-            days = np.random.uniform(1, 3)
-        elif failure_prob > 0.4:
-            days = np.random.uniform(3, 7)
+        try:
+            self.model = joblib.load("maintenance_model.joblib")
+            print("✅ XGBoost maintenance model loaded")
+        except FileNotFoundError:
+            self.model = None
+            print("⚠️  maintenance_model.joblib not found — using heuristic fallback")
+
+    def predict_failure_probability(
+        self,
+        machine_id: str,
+        temperature: float,
+        vibration: float,
+        power_consumption: float,
+        db=None,
+    ) -> tuple:
+        """Returns (failure_probability: 0-1, days_to_failure: float)."""
+
+        if self.model is not None and db is not None:
+            recent_rows = (
+                db.query(SensorReading)
+                .filter(SensorReading.machine_id == machine_id)
+                .order_by(SensorReading.timestamp.desc())
+                .limit(5)
+                .all()
+            )
+            # reverse so oldest-first for the rolling window
+            recent = [(r.temperature, r.vibration, r.power_consumption)
+                      for r in reversed(recent_rows)]
+            feats = compute_features(machine_id, temperature, vibration, power_consumption, recent)
+            failure_prob = float(self.model.predict_proba(feats)[0, 1])
         else:
-            days = np.random.uniform(7, 30)
-        
+            risk_score = (vibration / 10.0) * 0.5 + (temperature / 80.0) * 0.5
+            failure_prob = min(risk_score, 1.0)
+
+        if failure_prob > 0.8:
+            days = np.random.uniform(1, 2)
+        elif failure_prob > 0.6:
+            days = np.random.uniform(2, 5)
+        elif failure_prob > 0.4:
+            days = np.random.uniform(5, 10)
+        else:
+            days = np.random.uniform(10, 30)
+
         return failure_prob, days
 
 class ProductionScheduler:
@@ -222,7 +243,7 @@ async def continuous_sensor_feed():
 
                 # Create alert if threshold crossed
                 prob, days = predictor.predict_failure_probability(
-                    state["temp"], state["vib"], state["power"]
+                    machine_id, state["temp"], state["vib"], state["power"], db
                 )
                 if prob > 0.6:
                     db.add(MaintenanceAlert(
@@ -330,7 +351,7 @@ async def ingest_sensor_reading(reading: SensorReadingIn, db: Session = Depends(
     
     # Predict maintenance if threshold exceeded
     failure_prob, days_to_failure = maintenance_predictor.predict_failure_probability(
-        reading.temperature, reading.vibration, reading.power_consumption
+        reading.machine_id, reading.temperature, reading.vibration, reading.power_consumption, db
     )
     
     if failure_prob > 0.6:  # Alert threshold
