@@ -365,7 +365,7 @@ Run both services locally as described in "Running the Project" section.
 - [x] **Phase 1**: FastAPI + Streamlit scaffold, synthetic data, real-time sensor feed
 - [x] **Phase 2**: Production scheduler (greedy nearest-neighbor + Gantt) + Reports (OEE gauges, PDF export)
 - [x] **Phase 3**: Trained XGBoost maintenance predictor — 92.4% TPR, 0.92 PR-AUC; latent health-state labels; deployed on Railway
-- [ ] **Phase 4**: Anomaly detection (Isolation Forest / autoencoder) for unsupervised fault discovery
+- [x] **Phase 4**: Isolation Forest anomaly detector (unsupervised) — dual-signal risk dashboard; `/risk-analysis` endpoint; committed artifact deployed on Railway
 - [ ] **Phase 5**: Live SCADA integration (OPC-UA connector)
 - [ ] **Phase 6**: Multi-plant support, admin dashboard, role-based access
 - [ ] **Phase 7**: Time-series RUL forecasting (Prophet / ARIMA)
