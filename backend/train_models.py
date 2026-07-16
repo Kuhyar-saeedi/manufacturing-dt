@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from xgboost import XGBClassifier
+from sklearn.ensemble import IsolationForest
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,
@@ -187,11 +188,52 @@ def train_and_evaluate(df: pd.DataFrame) -> XGBClassifier:
     print(f"ROC-AUC: {roc_auc_score(y_test, y_prob):.3f}")
 
     if tpr < 0.85:
-        print("\n⚠️  TPR below 85% target — consider increasing N_FAULT_EPISODES or FAILURE_WINDOW.")
+        print("\nWARN: TPR below 85% target — consider increasing N_FAULT_EPISODES or FAILURE_WINDOW.")
     else:
-        print("\n✅ TPR target met (≥ 85%)")
+        print("\nOK: TPR target met (>= 85%)")
 
     return model
+
+
+# ── Isolation Forest (unsupervised anomaly detector) ─────────────────────────
+
+def train_anomaly_detector(df: pd.DataFrame) -> dict:
+    """
+    Train IsolationForest on normal-episode data only.
+
+    Returns a dict with the fitted model and the score range observed on training
+    data so inference can normalize scores to [0, 1].
+    """
+    normal_mask = df["episode"].str.contains("normal")
+    X_normal = df.loc[normal_mask, FEATURE_COLS].values
+
+    print(f"Anomaly detector — training on {len(X_normal):,} normal rows")
+
+    iforest = IsolationForest(
+        n_estimators=200,
+        contamination=0.05,
+        random_state=42,
+        n_jobs=-1,
+    )
+    iforest.fit(X_normal)
+
+    # Calibrate score range using the full dataset (includes fault episodes)
+    X_all = df[FEATURE_COLS].values
+    raw_scores = iforest.score_samples(X_all)
+    score_min = float(raw_scores.min())
+    score_max = float(raw_scores.max())
+
+    # Quick evaluation: IF should assign lower scores to fault rows
+    y_all = df["label"].values
+    normal_mean = raw_scores[y_all == 0].mean()
+    fault_mean  = raw_scores[y_all == 1].mean()
+    print(f"Mean score — normal: {normal_mean:.4f}  |  pre-failure: {fault_mean:.4f}")
+    if fault_mean < normal_mean:
+        print("✅ IF correctly scores pre-failure readings as more anomalous")
+    else:
+        print("⚠️  IF scores not clearly separated — check feature distribution")
+
+    return {"model": iforest, "score_min": score_min, "score_max": score_max}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -206,7 +248,14 @@ if __name__ == "__main__":
     print("Training XGBoost model...")
     model = train_and_evaluate(df)
 
-    out = "maintenance_model.joblib"
-    joblib.dump(model, out)
-    print(f"\nModel saved → {out}")
-    print("Commit this file so Railway has it at deploy time.")
+    xgb_out = "maintenance_model.joblib"
+    joblib.dump(model, xgb_out)
+    print(f"\nXGBoost model saved → {xgb_out}")
+
+    print("\nTraining Isolation Forest anomaly detector...")
+    anomaly_artifact = train_anomaly_detector(df)
+
+    if_out = "anomaly_model.joblib"
+    joblib.dump(anomaly_artifact, if_out)
+    print(f"Anomaly model saved → {if_out}")
+    print("\nCommit both .joblib files so Railway has them at deploy time.")

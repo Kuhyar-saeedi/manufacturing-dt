@@ -8,6 +8,7 @@ import requests
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
 
@@ -31,6 +32,15 @@ API_BASE = get_api_base()
 # ============================================================================
 # LOAD DATA
 # ============================================================================
+
+@st.cache_data(ttl=60)
+def load_risk_analysis(api_base: str):
+    try:
+        resp = requests.get(f"{api_base}/risk-analysis", timeout=15)
+        resp.raise_for_status()
+        return pd.DataFrame(resp.json())
+    except Exception:
+        return None
 
 @st.cache_data(ttl=60)
 def load_sensor_data(api_base: str):
@@ -59,10 +69,68 @@ def calculate_risk_score(row):
 
 with st.spinner("Loading maintenance data..."):
     df = load_sensor_data(API_BASE)
+    risk_df = load_risk_analysis(API_BASE)
 
 if df is None:
     st.warning("No data available. Make sure the backend is running.")
     st.stop()
+
+# ============================================================================
+# DUAL-SIGNAL RISK INTELLIGENCE
+# ============================================================================
+
+if risk_df is not None and not risk_df.empty:
+    st.markdown("### 🤖 Dual-Signal Risk Intelligence")
+    st.caption(
+        "**XGBoost** (supervised) detects known failure patterns from labeled training data. "
+        "**Isolation Forest** (unsupervised) flags any sensor combination that deviates from normal — "
+        "no failure labels needed. Together they catch both known and novel fault modes."
+    )
+
+    # Grouped bar chart: XGBoost vs IF per machine
+    fig_dual = go.Figure()
+    fig_dual.add_trace(go.Bar(
+        name="XGBoost Failure Probability",
+        x=risk_df["machine_id"],
+        y=(risk_df["xgb_failure_probability"] * 100).round(1),
+        marker_color="#EF553B",
+        text=(risk_df["xgb_failure_probability"] * 100).round(1).astype(str) + "%",
+        textposition="outside",
+    ))
+    fig_dual.add_trace(go.Bar(
+        name="Isolation Forest Anomaly Score",
+        x=risk_df["machine_id"],
+        y=(risk_df["if_anomaly_score"] * 100).round(1),
+        marker_color="#636EFA",
+        text=(risk_df["if_anomaly_score"] * 100).round(1).astype(str) + "%",
+        textposition="outside",
+    ))
+    fig_dual.update_layout(
+        barmode="group",
+        yaxis=dict(title="Risk Score (%)", range=[0, 110]),
+        xaxis_title="Machine",
+        height=350,
+        margin=dict(l=0, r=0, t=10, b=0),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        shapes=[
+            dict(type="line", x0=-0.5, x1=4.5, y0=60, y1=60,
+                 line=dict(color="orange", dash="dash", width=1.5)),
+        ],
+        annotations=[
+            dict(x=4.5, y=62, xref="x", yref="y", text="High risk (60%)",
+                 showarrow=False, font=dict(color="orange", size=11), xanchor="right"),
+        ],
+    )
+    st.plotly_chart(fig_dual, use_container_width=True)
+
+    # Combined risk summary table
+    display_df = risk_df[["machine_id", "xgb_failure_probability", "if_anomaly_score", "combined_risk"]].copy()
+    display_df.columns = ["Machine", "XGBoost Prob", "IF Anomaly", "Combined Risk"]
+    for col in ["XGBoost Prob", "IF Anomaly", "Combined Risk"]:
+        display_df[col] = (display_df[col] * 100).round(1).astype(str) + "%"
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.markdown("---")
 
 latest_readings = df.sort_values("timestamp").groupby("machine_id").tail(1).copy()
 latest_readings["risk_score"] = latest_readings.apply(calculate_risk_score, axis=1)

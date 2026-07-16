@@ -126,6 +126,15 @@ class SchedulingRecommendationOut(BaseModel):
     estimated_time_saved: float              # Minutes
     changeover_reduction: float              # Percentage
 
+class MachineRiskOut(BaseModel):
+    machine_id: str
+    xgb_failure_probability: float           # XGBoost supervised score 0-1
+    if_anomaly_score: float                  # Isolation Forest unsupervised score 0-1
+    combined_risk: float                     # max(xgb, if) — conservative union
+    temperature: float
+    vibration: float
+    power_consumption: float
+
 # ============================================================================
 # ML MODELS (Stubs - you'll train these later)
 # ============================================================================
@@ -178,6 +187,44 @@ class MaintenancePredictor:
             days = np.random.uniform(10, 30)
 
         return failure_prob, days
+
+class AnomalyDetector:
+    """
+    Isolation Forest anomaly detector — unsupervised, trained on normal data only.
+    Returns a score in [0, 1] where 1.0 = highly anomalous.
+    """
+
+    def __init__(self):
+        try:
+            artifact = joblib.load("anomaly_model.joblib")
+            self.model      = artifact["model"]
+            self.score_min  = artifact["score_min"]
+            self.score_max  = artifact["score_max"]
+            print("✅ Isolation Forest anomaly model loaded")
+        except FileNotFoundError:
+            self.model = None
+            print("⚠️  anomaly_model.joblib not found — anomaly scoring disabled")
+
+    def score(
+        self,
+        machine_id: str,
+        temp: float,
+        vib: float,
+        power: float,
+        recent: list,
+    ) -> float:
+        """Returns anomaly score in [0, 1]; higher means more anomalous."""
+        if self.model is None:
+            return 0.0
+        feats = compute_features(machine_id, temp, vib, power, recent)
+        raw = float(self.model.score_samples(feats)[0])
+        spread = self.score_max - self.score_min
+        if spread == 0:
+            return 0.0
+        # Lower raw score → more anomalous → higher output score
+        normalized = (self.score_max - raw) / spread
+        return float(np.clip(normalized, 0.0, 1.0))
+
 
 class ProductionScheduler:
     """Optimize job sequence to minimize changeovers"""
@@ -321,6 +368,7 @@ app.add_middleware(
 
 # Initialize ML models
 maintenance_predictor = MaintenancePredictor()
+anomaly_detector = AnomalyDetector()
 scheduler = ProductionScheduler()
 
 # ============================================================================
@@ -427,6 +475,54 @@ async def get_maintenance_alerts(db: Session = Depends(get_db)):
 
     alerts = db.query(MaintenanceAlert).filter(MaintenanceAlert.is_active == 1).all()
     return alerts
+
+@app.get("/risk-analysis", response_model=List[MachineRiskOut])
+async def get_risk_analysis(db: Session = Depends(get_db)):
+    """
+    Per-machine dual-signal risk: XGBoost (supervised) + Isolation Forest (unsupervised).
+    Uses the last 6 sensor readings per machine for rolling-window features.
+    """
+    machine_ids = ["M1", "M2", "M3", "M4", "M5"]
+    results = []
+
+    for machine_id in machine_ids:
+        rows = (
+            db.query(SensorReading)
+            .filter(SensorReading.machine_id == machine_id)
+            .order_by(SensorReading.timestamp.desc())
+            .limit(6)
+            .all()
+        )
+        if not rows:
+            continue
+
+        # Most recent reading
+        latest = rows[0]
+        # Older readings for rolling window (oldest-first)
+        recent = [(r.temperature, r.vibration, r.power_consumption)
+                  for r in reversed(rows[1:])]
+
+        xgb_prob, _ = maintenance_predictor.predict_failure_probability(
+            machine_id, latest.temperature, latest.vibration,
+            latest.power_consumption, db,
+        )
+        if_score = anomaly_detector.score(
+            machine_id, latest.temperature, latest.vibration,
+            latest.power_consumption, recent,
+        )
+
+        results.append(MachineRiskOut(
+            machine_id=machine_id,
+            xgb_failure_probability=round(xgb_prob, 4),
+            if_anomaly_score=round(if_score, 4),
+            combined_risk=round(max(xgb_prob, if_score), 4),
+            temperature=round(latest.temperature, 2),
+            vibration=round(latest.vibration, 3),
+            power_consumption=round(latest.power_consumption, 2),
+        ))
+
+    return results
+
 
 @app.post("/optimize-schedule", response_model=SchedulingRecommendationOut)
 async def optimize_production_schedule(job_ids: List[str], db: Session = Depends(get_db)):
