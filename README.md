@@ -2,6 +2,12 @@
 
 **Real-time monitoring, predictive maintenance & production optimization for smart manufacturing**
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://manufacturing-dt-yqhzjcqffrjz3whfd5jbne.streamlit.app/)
+[![Backend API](https://img.shields.io/badge/Backend%20API-Railway-0B0D0E?logo=railway&logoColor=white)](https://manufacturing-dt-production.up.railway.app/docs)
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.104-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![XGBoost](https://img.shields.io/badge/XGBoost-92.4%25%20TPR-F7931E)](https://xgboost.readthedocs.io)
+
 A full-stack Industry 4.0 digital twin that predicts equipment failures, visualizes factory floor status, and optimizes production scheduling using machine learning and real-time sensor data.
 
 ---
@@ -106,7 +112,7 @@ manufacturing-dt/
 
 #### 1. Clone the repository
 ```bash
-git clone https://github.com/yourusername/manufacturing-dt.git
+git clone https://github.com/Kuhyar-saeedi/manufacturing-dt.git
 cd manufacturing-dt
 ```
 
@@ -176,13 +182,13 @@ The dashboard will open at `http://localhost:8501`
 - **ROI Calculator**: Estimated savings from preventive maintenance
 - **Cost Impact**: Side-by-side comparison of unplanned vs. planned maintenance costs
 
-### Scheduler Page *(placeholder—to be built)*
-- Job sequencing optimizer
-- Gantt chart of optimized production schedule
+### Scheduler Page
+- Job sequencing optimizer (greedy nearest-neighbor)
+- Visual Gantt chart of the optimized production schedule
 - Time savings quantification
 
-### Reports Page *(placeholder—to be built)*
-- Historical trend analysis
+### Reports Page
+- Historical trend analysis (daily/weekly/monthly)
 - PDF export for stakeholder reports
 - Energy consumption analytics
 
@@ -202,7 +208,7 @@ The dashboard will open at `http://localhost:8501`
 - Estimated days to failure
 - Recommended action
 
-**Current Implementation:** Heuristic scoring; upgrade to **XGBoost** for production accuracy.
+**Current Implementation:** Trained XGBoost model — **92.4% TPR, 0.92 PR-AUC** on held-out test set. Latent health-state label design (not threshold-based); rolling 6-reading window features. Model committed as `backend/maintenance_model.joblib` and loaded at Railway startup (no cold-start training).
 
 ### Production Scheduler
 **Goal:** Minimize changeover time (SMED principle from your TOC/Kanban studies)
@@ -313,11 +319,11 @@ This is fundamentally an **AI systems engineering project**, not a manufacturing
 - **Systems thinking**: Combines predictive models (what will fail) with optimization algorithms (how to respond) for autonomous decision-making
 
 **Project Evolution (Next Iterations):**
-- Train XGBoost/RandomForest models for >85% failure prediction accuracy
+- Add unsupervised anomaly detection (Isolation Forest, autoencoders) for fault discovery without labeled data
 - Implement constraint-satisfaction solver for dynamic job scheduling
-- Add anomaly detection (isolation forests, autoencoders for unsupervised failure discovery)
-- Deploy with model monitoring & automated retraining pipelines
+- Deploy model monitoring & automated retraining pipelines
 - Extend to multi-step time-series forecasting (Prophet, ARIMA for RUL prediction)
+- Live SCADA integration via OPC-UA connector
 
 ---
 
@@ -340,7 +346,8 @@ railway link  # Link to your repo
 railway up    # Deploy FastAPI backend
 ```
 
-**Your live dashboard:** `https://your-username-manufacturing-dt.streamlit.app`
+**Live dashboard:** https://manufacturing-dt-yqhzjcqffrjz3whfd5jbne.streamlit.app/  
+**Backend API docs:** https://manufacturing-dt-production.up.railway.app/docs
 
 ### Option 2: Docker (Self-hosted)
 ```bash
@@ -355,13 +362,13 @@ Run both services locally as described in "Running the Project" section.
 
 ## 📦 Project Evolution (Roadmap)
 
-- [x] **Phase 1**: FastAPI + Streamlit scaffold, synthetic data, basic dashboards
-- [ ] **Phase 2**: Train XGBoost models on synthetic data, improve predictive accuracy
-- [ ] **Phase 3**: Add production scheduler optimizer (simulated annealing)
-- [ ] **Phase 4**: PDF report generation + email alerts
+- [x] **Phase 1**: FastAPI + Streamlit scaffold, synthetic data, real-time sensor feed
+- [x] **Phase 2**: Production scheduler (greedy nearest-neighbor + Gantt) + Reports (OEE gauges, PDF export)
+- [x] **Phase 3**: Trained XGBoost maintenance predictor — 92.4% TPR, 0.92 PR-AUC; latent health-state labels; deployed on Railway
+- [ ] **Phase 4**: Anomaly detection (Isolation Forest / autoencoder) for unsupervised fault discovery
 - [ ] **Phase 5**: Live SCADA integration (OPC-UA connector)
 - [ ] **Phase 6**: Multi-plant support, admin dashboard, role-based access
-- [ ] **Phase 7**: Historical analytics with time-series forecasting (Prophet/ARIMA)
+- [ ] **Phase 7**: Time-series RUL forecasting (Prophet / ARIMA)
 
 ---
 
@@ -381,7 +388,9 @@ By completing this project, you showcase:
 
 ## 📸 Screenshots
 
-*(Add screenshots/GIFs of dashboards here in production)*
+> **[Live Demo →](https://manufacturing-dt-yqhzjcqffrjz3whfd5jbne.streamlit.app/)**
+
+*(Screenshots and demo GIF coming soon)*
 
 ---
 
