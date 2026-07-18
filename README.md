@@ -366,7 +366,7 @@ Run both services locally as described in "Running the Project" section.
 - [x] **Phase 2**: Production scheduler (greedy nearest-neighbor + Gantt) + Reports (OEE gauges, PDF export)
 - [x] **Phase 3**: Trained XGBoost maintenance predictor — 92.4% TPR, 0.92 PR-AUC; latent health-state labels; deployed on Railway
 - [x] **Phase 4**: Isolation Forest anomaly detector (unsupervised) — dual-signal risk dashboard; `/risk-analysis` endpoint; committed artifact deployed on Railway
-- [ ] **Phase 5**: Live SCADA integration (OPC-UA connector)
+- [x] **Phase 5**: OPC-UA SCADA integration — in-process asyncua server + subscription bridge; 30-node address space (5 machines × 6 tags); `/opcua-status` endpoint; SCADA monitor page with node-ID reference table
 - [ ] **Phase 6**: Multi-plant support, admin dashboard, role-based access
 - [ ] **Phase 7**: Time-series RUL forecasting (Prophet / ARIMA)
 
