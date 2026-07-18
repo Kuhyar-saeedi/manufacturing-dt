@@ -15,6 +15,8 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 import joblib
 from typing import List, Dict
 from model_utils import compute_features
+from opcua_server import ManufacturingOPCServer
+from opcua_client import run_opcua_bridge, opcua_status
 
 # ============================================================================
 # DATABASE SETUP
@@ -135,6 +137,20 @@ class MachineRiskOut(BaseModel):
     vibration: float
     power_consumption: float
 
+class OPCNodeInfo(BaseModel):
+    machine_id: str
+    signal: str
+    node_id: str
+    value: float
+    last_updated: str
+
+class OPCStatusOut(BaseModel):
+    connected: bool
+    endpoint: str
+    server_time: str | None
+    nodes: List[OPCNodeInfo]
+    readings_received: int
+
 # ============================================================================
 # ML MODELS (Stubs - you'll train these later)
 # ============================================================================
@@ -251,66 +267,54 @@ class ProductionScheduler:
         return optimized_order, time_saved
 
 # ============================================================================
-# BACKGROUND SENSOR FEED
+# SHARED SENSOR INGEST (called by OPC-UA bridge and REST endpoint)
 # ============================================================================
 
-# Per-machine state for realistic random-walk simulation
-_machine_state = {
-    m: {"temp": 65.0 + np.random.normal(0, 5),
-        "vib":  2.0  + np.random.uniform(0, 1),
-        "power": 15.0 + np.random.normal(0, 2)}
-    for m in ["M1", "M2", "M3", "M4", "M5"]
-}
+def ingest_sensor_data(
+    db: Session,
+    machine_id: str,
+    temperature: float,
+    vibration: float,
+    power_consumption: float,
+    production_count: int,
+    downtime_minutes: float,
+    quality_score: float,
+) -> SensorReading:
+    """Write one sensor reading to the DB, create a maintenance alert if needed,
+    and prune rows older than 72 hours. Synchronous — safe to call from a thread."""
+    now = datetime.now()
+    reading = SensorReading(
+        machine_id=machine_id,
+        timestamp=now,
+        temperature=round(temperature, 2),
+        vibration=round(vibration, 3),
+        power_consumption=round(power_consumption, 2),
+        production_count=int(production_count),
+        downtime_minutes=float(downtime_minutes),
+        quality_score=round(quality_score, 2),
+    )
+    db.add(reading)
 
-async def continuous_sensor_feed():
-    """Add one reading per machine every 60 seconds; prune data older than 72 h."""
-    predictor = MaintenancePredictor()
-    while True:
-        await asyncio.sleep(60)
-        db = SessionLocal()
-        try:
-            now = datetime.now()
-            for machine_id, state in _machine_state.items():
-                # Random walk keeps values realistic
-                state["temp"]  = float(np.clip(state["temp"]  + np.random.normal(0, 1.5), 40, 95))
-                state["vib"]   = float(np.clip(state["vib"]   + np.random.normal(0, 0.3), 0.3, 10))
-                state["power"] = float(np.clip(state["power"] + np.random.normal(0, 0.8), 5, 35))
+    prob, days = maintenance_predictor.predict_failure_probability(
+        machine_id, temperature, vibration, power_consumption, db
+    )
+    if prob > 0.6:
+        db.add(MaintenanceAlert(
+            machine_id=machine_id,
+            timestamp=now,
+            failure_probability=prob,
+            days_to_failure=days,
+            recommended_action="Schedule preventive maintenance",
+        ))
 
-                reading = SensorReading(
-                    machine_id=machine_id,
-                    timestamp=now,
-                    temperature=round(state["temp"], 2),
-                    vibration=round(state["vib"], 3),
-                    power_consumption=round(state["power"], 2),
-                    production_count=int(np.random.randint(5, 20)),
-                    downtime_minutes=float(max(0, np.random.normal(0, 2))),
-                    quality_score=float(np.clip(np.random.normal(92, 5), 70, 100)),
-                )
-                db.add(reading)
+    db.commit()
+    db.refresh(reading)
 
-                # Create alert if threshold crossed
-                prob, days = predictor.predict_failure_probability(
-                    machine_id, state["temp"], state["vib"], state["power"], db
-                )
-                if prob > 0.6:
-                    db.add(MaintenanceAlert(
-                        machine_id=machine_id,
-                        timestamp=now,
-                        failure_probability=prob,
-                        days_to_failure=days,
-                        recommended_action="Schedule preventive maintenance",
-                    ))
+    cutoff = now - timedelta(hours=72)
+    db.query(SensorReading).filter(SensorReading.timestamp < cutoff).delete()
+    db.commit()
 
-            db.commit()
-
-            # Prune readings older than 72 hours to keep DB lean
-            cutoff = now - timedelta(hours=72)
-            db.query(SensorReading).filter(SensorReading.timestamp < cutoff).delete()
-            db.commit()
-        except Exception as exc:
-            print(f"⚠️  Sensor feed error: {exc}")
-        finally:
-            db.close()
+    return reading
 
 
 def seed_database():
@@ -341,10 +345,21 @@ async def lifespan(app: FastAPI):
     print("✅ Manufacturing DT API starting up...")
     seed_database()
     print("🤖 ML models: Ready")
-    task = asyncio.create_task(continuous_sensor_feed())
+
+    opc_server = ManufacturingOPCServer()
+    await opc_server.init()
+    await opc_server.start()
+
+    server_task = asyncio.create_task(opc_server.update_loop())
+    bridge_task = asyncio.create_task(
+        run_opcua_bridge(ingest_sensor_data, SessionLocal)
+    )
+
     yield
-    task.cancel()
-    print("🛑 Sensor feed stopped")
+
+    server_task.cancel()
+    bridge_task.cancel()
+    await opc_server.stop()
 
 
 # ============================================================================
@@ -382,39 +397,22 @@ async def health():
 
 @app.post("/sensor-reading", response_model=SensorReadingOut)
 async def ingest_sensor_reading(reading: SensorReadingIn, db: Session = Depends(get_db)):
-    """Ingest sensor data from factory equipment"""
-    
-    # Store in database
-    db_reading = SensorReading(
+    """Ingest sensor data from factory equipment (REST fallback; primary path is OPC-UA)"""
+    return ingest_sensor_data(
+        db=db,
         machine_id=reading.machine_id,
-        timestamp=datetime.now(),
         temperature=reading.temperature,
         vibration=reading.vibration,
         power_consumption=reading.power_consumption,
         production_count=reading.production_count,
         downtime_minutes=reading.downtime_minutes,
-        quality_score=reading.quality_score
+        quality_score=reading.quality_score,
     )
-    db.add(db_reading)
-    
-    # Predict maintenance if threshold exceeded
-    failure_prob, days_to_failure = maintenance_predictor.predict_failure_probability(
-        reading.machine_id, reading.temperature, reading.vibration, reading.power_consumption, db
-    )
-    
-    if failure_prob > 0.6:  # Alert threshold
-        alert = MaintenanceAlert(
-            machine_id=reading.machine_id,
-            timestamp=datetime.now(),
-            failure_probability=failure_prob,
-            days_to_failure=days_to_failure,
-            recommended_action="Schedule preventive maintenance"
-        )
-        db.add(alert)
-    
-    db.commit()
-    db.refresh(db_reading)
-    return db_reading
+
+@app.get("/opcua-status", response_model=OPCStatusOut)
+async def get_opcua_status():
+    """OPC-UA bridge status: connection state, node IDs, and live values."""
+    return OPCStatusOut(**opcua_status)
 
 @app.get("/factory-status", response_model=FactoryStatusOut)
 async def get_factory_status(db: Session = Depends(get_db)):
