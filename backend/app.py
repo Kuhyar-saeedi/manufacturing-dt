@@ -11,12 +11,16 @@ import asyncio
 import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 import joblib
-from typing import List, Dict
+from typing import List, Optional
+from pydantic import BaseModel
+
 from model_utils import compute_features
 from opcua_server import ManufacturingOPCServer
 from opcua_client import run_opcua_bridge, opcua_status
+from auth import create_access_token, require_admin, get_current_user, DEMO_USERS
 
 # ============================================================================
 # DATABASE SETUP
@@ -27,58 +31,69 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+PLANTS = ["alpha", "beta", "gamma"]
+
 # ============================================================================
 # DATABASE MODELS
 # ============================================================================
 
 class SensorReading(Base):
-    """Store raw sensor data from factory machines"""
     __tablename__ = "sensor_readings"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    machine_id = Column(String, index=True)  # M1, M2, ..., M5
-    timestamp = Column(DateTime, index=True)
-    temperature = Column(Float)              # Celsius
-    vibration = Column(Float)                # mm/s
-    power_consumption = Column(Float)        # kW
-    production_count = Column(Integer)       # Parts produced
-    downtime_minutes = Column(Float)         # Equipment downtime
-    quality_score = Column(Float)            # 0-100, defect rate
 
-class MaintenanceAlert(Base):
-    """Store predicted maintenance alerts"""
-    __tablename__ = "maintenance_alerts"
-    
     id = Column(Integer, primary_key=True, index=True)
     machine_id = Column(String, index=True)
+    plant_id = Column(String, index=True, default="alpha")
+    timestamp = Column(DateTime, index=True)
+    temperature = Column(Float)
+    vibration = Column(Float)
+    power_consumption = Column(Float)
+    production_count = Column(Integer)
+    downtime_minutes = Column(Float)
+    quality_score = Column(Float)
+
+
+class MaintenanceAlert(Base):
+    __tablename__ = "maintenance_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(String, index=True)
+    plant_id = Column(String, index=True, default="alpha")
     timestamp = Column(DateTime)
-    failure_probability = Column(Float)      # 0-1, likelihood of failure
-    days_to_failure = Column(Float)          # Predicted days until failure
-    recommended_action = Column(String)      # e.g., "Schedule maintenance"
+    failure_probability = Column(Float)
+    days_to_failure = Column(Float)
+    recommended_action = Column(String)
     is_active = Column(Integer, default=1)
 
+
 class ProductionJob(Base):
-    """Store production jobs and scheduling"""
     __tablename__ = "production_jobs"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(String, unique=True, index=True)
     machine_id = Column(String, index=True)
-    product_type = Column(String)            # e.g., "Part_A", "Part_B"
+    plant_id = Column(String, index=True, default="alpha")
+    product_type = Column(String)
     scheduled_start = Column(DateTime)
     scheduled_end = Column(DateTime)
-    changeover_time = Column(Float)          # Minutes
+    changeover_time = Column(Float)
     quantity = Column(Integer)
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+
+def ensure_schema():
+    """Drop and recreate all tables when the plant_id column is missing."""
+    insp = sa_inspect(engine)
+    if "sensor_readings" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("sensor_readings")}
+        if "plant_id" not in cols:
+            print("⚠️  Schema migration: dropping tables to add plant_id...")
+            Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
 
 # ============================================================================
-# DEPENDENCY FUNCTION
+# DEPENDENCY
 # ============================================================================
 
 def get_db():
-    """Dependency: Get database session"""
     db = SessionLocal()
     try:
         yield db
@@ -86,13 +101,25 @@ def get_db():
         db.close()
 
 # ============================================================================
-# PYDANTIC SCHEMAS (API Input/Output)
+# PYDANTIC SCHEMAS
 # ============================================================================
 
-from pydantic import BaseModel
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str
+
+class UserOut(BaseModel):
+    username: str
+    role: str
+    plant_id: Optional[str]
 
 class SensorReadingIn(BaseModel):
     machine_id: str
+    plant_id: str = "alpha"
     temperature: float
     vibration: float
     power_consumption: float
@@ -108,6 +135,7 @@ class SensorReadingOut(SensorReadingIn):
 
 class MaintenanceAlertOut(BaseModel):
     machine_id: str
+    plant_id: str
     failure_probability: float
     days_to_failure: float
     recommended_action: str
@@ -116,23 +144,33 @@ class MaintenanceAlertOut(BaseModel):
         from_attributes = True
 
 class FactoryStatusOut(BaseModel):
+    plant_id: str
     total_machines: int
     total_production_today: int
-    average_oee: float                       # Overall Equipment Effectiveness
+    average_oee: float
     active_alerts: int
-    predicted_downtime_cost: float           # USD
+    predicted_downtime_cost: float
     timestamp: datetime
 
+class PlantSummaryOut(BaseModel):
+    plant_id: str
+    total_machines: int
+    total_production_24h: int
+    average_oee: float
+    active_alerts: int
+    avg_quality: float
+
 class SchedulingRecommendationOut(BaseModel):
-    optimized_job_order: List[str]           # Reordered job IDs
-    estimated_time_saved: float              # Minutes
-    changeover_reduction: float              # Percentage
+    optimized_job_order: List[str]
+    estimated_time_saved: float
+    changeover_reduction: float
 
 class MachineRiskOut(BaseModel):
     machine_id: str
-    xgb_failure_probability: float           # XGBoost supervised score 0-1
-    if_anomaly_score: float                  # Isolation Forest unsupervised score 0-1
-    combined_risk: float                     # max(xgb, if) — conservative union
+    plant_id: str
+    xgb_failure_probability: float
+    if_anomaly_score: float
+    combined_risk: float
     temperature: float
     vibration: float
     power_consumption: float
@@ -152,12 +190,10 @@ class OPCStatusOut(BaseModel):
     readings_received: int
 
 # ============================================================================
-# ML MODELS (Stubs - you'll train these later)
+# ML MODELS
 # ============================================================================
 
 class MaintenancePredictor:
-    """Predict equipment failure probability using a trained XGBoost model."""
-
     def __init__(self):
         try:
             self.model = joblib.load("maintenance_model.joblib")
@@ -173,20 +209,23 @@ class MaintenancePredictor:
         vibration: float,
         power_consumption: float,
         db=None,
+        plant_id: str = "alpha",
     ) -> tuple:
-        """Returns (failure_probability: 0-1, days_to_failure: float)."""
-
         if self.model is not None and db is not None:
             recent_rows = (
                 db.query(SensorReading)
-                .filter(SensorReading.machine_id == machine_id)
+                .filter(
+                    SensorReading.machine_id == machine_id,
+                    SensorReading.plant_id == plant_id,
+                )
                 .order_by(SensorReading.timestamp.desc())
                 .limit(5)
                 .all()
             )
-            # reverse so oldest-first for the rolling window
-            recent = [(r.temperature, r.vibration, r.power_consumption)
-                      for r in reversed(recent_rows)]
+            recent = [
+                (r.temperature, r.vibration, r.power_consumption)
+                for r in reversed(recent_rows)
+            ]
             feats = compute_features(machine_id, temperature, vibration, power_consumption, recent)
             failure_prob = float(self.model.predict_proba(feats)[0, 1])
         else:
@@ -204,12 +243,8 @@ class MaintenancePredictor:
 
         return failure_prob, days
 
-class AnomalyDetector:
-    """
-    Isolation Forest anomaly detector — unsupervised, trained on normal data only.
-    Returns a score in [0, 1] where 1.0 = highly anomalous.
-    """
 
+class AnomalyDetector:
     def __init__(self):
         try:
             artifact = joblib.load("anomaly_model.joblib")
@@ -221,15 +256,7 @@ class AnomalyDetector:
             self.model = None
             print("⚠️  anomaly_model.joblib not found — anomaly scoring disabled")
 
-    def score(
-        self,
-        machine_id: str,
-        temp: float,
-        vib: float,
-        power: float,
-        recent: list,
-    ) -> float:
-        """Returns anomaly score in [0, 1]; higher means more anomalous."""
+    def score(self, machine_id, temp, vib, power, recent) -> float:
         if self.model is None:
             return 0.0
         feats = compute_features(machine_id, temp, vib, power, recent)
@@ -237,16 +264,11 @@ class AnomalyDetector:
         spread = self.score_max - self.score_min
         if spread == 0:
             return 0.0
-        # Lower raw score → more anomalous → higher output score
-        normalized = (self.score_max - raw) / spread
-        return float(np.clip(normalized, 0.0, 1.0))
+        return float(np.clip((self.score_max - raw) / spread, 0.0, 1.0))
 
 
 class ProductionScheduler:
-    """Optimize job sequence to minimize changeovers"""
-    
     def __init__(self):
-        # Changeover time matrix (minutes): Part_A → Part_B, etc.
         self.changeover_matrix = {
             ("Part_A", "Part_B"): 15,
             ("Part_B", "Part_A"): 15,
@@ -255,19 +277,14 @@ class ProductionScheduler:
             ("Part_B", "Part_C"): 20,
             ("Part_C", "Part_B"): 20,
         }
-    
-    def optimize_job_order(self, jobs: List[Dict]) -> tuple:
-        """
-        Simple greedy scheduler: pick next job with minimal changeover
-        Returns: (optimized_job_order, time_saved_minutes)
-        """
-        # Placeholder: implement nearest-neighbor or simulated annealing later
+
+    def optimize_job_order(self, jobs: list) -> tuple:
         optimized_order = sorted([j['id'] for j in jobs])
         time_saved = np.random.uniform(10, 120)
         return optimized_order, time_saved
 
 # ============================================================================
-# SHARED SENSOR INGEST (called by OPC-UA bridge and REST endpoint)
+# SHARED SENSOR INGEST
 # ============================================================================
 
 def ingest_sensor_data(
@@ -279,12 +296,12 @@ def ingest_sensor_data(
     production_count: int,
     downtime_minutes: float,
     quality_score: float,
+    plant_id: str = "alpha",
 ) -> SensorReading:
-    """Write one sensor reading to the DB, create a maintenance alert if needed,
-    and prune rows older than 72 hours. Synchronous — safe to call from a thread."""
     now = datetime.now()
     reading = SensorReading(
         machine_id=machine_id,
+        plant_id=plant_id,
         timestamp=now,
         temperature=round(temperature, 2),
         vibration=round(vibration, 3),
@@ -296,11 +313,12 @@ def ingest_sensor_data(
     db.add(reading)
 
     prob, days = maintenance_predictor.predict_failure_probability(
-        machine_id, temperature, vibration, power_consumption, db
+        machine_id, temperature, vibration, power_consumption, db, plant_id
     )
     if prob > 0.6:
         db.add(MaintenanceAlert(
             machine_id=machine_id,
+            plant_id=plant_id,
             timestamp=now,
             failure_probability=prob,
             days_to_failure=days,
@@ -318,22 +336,23 @@ def ingest_sensor_data(
 
 
 def seed_database():
-    """Seed 48 h of synthetic data if no recent readings exist."""
     db = SessionLocal()
     try:
         cutoff = datetime.now() - timedelta(hours=24)
         recent = db.query(SensorReading).filter(SensorReading.timestamp >= cutoff).count()
         if recent == 0:
-            print("📊 No recent data — seeding 48 h of synthetic readings...")
-            # Clear stale rows first
+            print("📊 No recent data — seeding 48 h of synthetic readings for 3 plants...")
             db.query(SensorReading).delete()
             db.commit()
             from sensor_simulator import FactorySensorSimulator
-            simulator = FactorySensorSimulator(n_machines=5, n_hours=48)
-            df = simulator.generate_readings()
-            df = simulator.add_anomalies(df)
-            df.to_sql("sensor_readings", engine, if_exists="append", index=False)
-            print(f"✅ Seeded {len(df)} readings")
+            for plant_id in PLANTS:
+                simulator = FactorySensorSimulator(n_machines=5, n_hours=48)
+                df = simulator.generate_readings()
+                df = simulator.add_anomalies(df)
+                df["plant_id"] = plant_id
+                df.to_sql("sensor_readings", engine, if_exists="append", index=False)
+            total = db.query(SensorReading).count()
+            print(f"✅ Seeded {total} readings across {len(PLANTS)} plants")
         else:
             print(f"📊 Database ready: {recent} recent readings")
     finally:
@@ -343,6 +362,7 @@ def seed_database():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("✅ Manufacturing DT API starting up...")
+    ensure_schema()
     seed_database()
     print("🤖 ML models: Ready")
 
@@ -361,9 +381,8 @@ async def lifespan(app: FastAPI):
     bridge_task.cancel()
     await opc_server.stop()
 
-
 # ============================================================================
-# FASTAPI APP SETUP
+# FASTAPI APP
 # ============================================================================
 
 app = FastAPI(
@@ -372,7 +391,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Enable CORS for Streamlit frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -381,26 +399,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize ML models
 maintenance_predictor = MaintenancePredictor()
 anomaly_detector = AnomalyDetector()
 scheduler = ProductionScheduler()
 
 # ============================================================================
-# API ENDPOINTS
+# AUTH ENDPOINTS
+# ============================================================================
+
+@app.post("/auth/login", response_model=TokenOut)
+async def login(credentials: LoginRequest):
+    user = DEMO_USERS.get(credentials.username)
+    if not user or user["password"] != credentials.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = create_access_token(credentials.username, user["role"], user["plant_id"])
+    return TokenOut(access_token=token, token_type="bearer")
+
+
+@app.get("/auth/me", response_model=UserOut)
+async def me(user: Optional[dict] = Depends(get_current_user)):
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return UserOut(username=user["sub"], role=user["role"], plant_id=user.get("plant_id"))
+
+# ============================================================================
+# CORE ENDPOINTS
 # ============================================================================
 
 @app.get("/health")
 async def health():
-    """Health check"""
     return {"status": "ok", "timestamp": datetime.now()}
+
+
+@app.get("/plants")
+async def list_plants():
+    return {"plants": PLANTS}
+
 
 @app.post("/sensor-reading", response_model=SensorReadingOut)
 async def ingest_sensor_reading(reading: SensorReadingIn, db: Session = Depends(get_db)):
-    """Ingest sensor data from factory equipment (REST fallback; primary path is OPC-UA)"""
     return ingest_sensor_data(
         db=db,
         machine_id=reading.machine_id,
+        plant_id=reading.plant_id,
         temperature=reading.temperature,
         vibration=reading.vibration,
         power_consumption=reading.power_consumption,
@@ -409,84 +450,96 @@ async def ingest_sensor_reading(reading: SensorReadingIn, db: Session = Depends(
         quality_score=reading.quality_score,
     )
 
+
 @app.get("/opcua-status", response_model=OPCStatusOut)
 async def get_opcua_status():
-    """OPC-UA bridge status: connection state, node IDs, and live values."""
     return OPCStatusOut(**opcua_status)
 
+
 @app.get("/factory-status", response_model=FactoryStatusOut)
-async def get_factory_status(db: Session = Depends(get_db)):
-    """Get real-time factory status and KPIs"""
-    
-    # Get latest readings from last 24 hours
+async def get_factory_status(plant_id: str = "alpha", db: Session = Depends(get_db)):
     cutoff = datetime.now() - timedelta(hours=24)
-    readings = db.query(SensorReading).filter(SensorReading.timestamp >= cutoff).all()
-    
+    readings = (
+        db.query(SensorReading)
+        .filter(SensorReading.plant_id == plant_id, SensorReading.timestamp >= cutoff)
+        .all()
+    )
+
     if not readings:
         raise HTTPException(status_code=404, detail="No recent data available")
-    
+
     df = pd.DataFrame([
         {
-            'machine_id': r.machine_id,
-            'production_count': r.production_count,
-            'downtime_minutes': r.downtime_minutes,
-            'quality_score': r.quality_score
+            "machine_id": r.machine_id,
+            "production_count": r.production_count,
+            "downtime_minutes": r.downtime_minutes,
+            "quality_score": r.quality_score,
         }
         for r in readings
     ])
-    
-    # Calculate OEE (Overall Equipment Effectiveness)
-    # OEE = (Availability) × (Performance) × (Quality)
-    total_time = 24 * 60  # minutes
-    availability = 1 - (df['downtime_minutes'].sum() / (total_time * len(df['machine_id'].unique())))
-    performance = df['production_count'].sum() / (len(df['machine_id'].unique()) * 100)  # Assume 100 parts/machine/day nominal
-    quality = df['quality_score'].mean() / 100
-    oee = availability * performance * quality
-    
-    # Count active maintenance alerts
-    active_alerts = db.query(MaintenanceAlert).filter(MaintenanceAlert.is_active == 1).count()
-    
-    # Estimate downtime cost (rough: $50/minute per machine)
-    downtime_cost = df['downtime_minutes'].sum() * 50
-    
+
+    total_time = 24 * 60
+    n_machines = len(df["machine_id"].unique())
+    availability = 1 - (df["downtime_minutes"].sum() / (total_time * n_machines))
+    performance = df["production_count"].sum() / (n_machines * 100)
+    quality = df["quality_score"].mean() / 100
+    oee = float(np.clip(availability * performance * quality, 0, 1))
+
+    active_alerts = (
+        db.query(MaintenanceAlert)
+        .filter(MaintenanceAlert.plant_id == plant_id, MaintenanceAlert.is_active == 1)
+        .count()
+    )
+    downtime_cost = df["downtime_minutes"].sum() * 50
+
     return FactoryStatusOut(
-        total_machines=len(df['machine_id'].unique()),
-        total_production_today=int(df['production_count'].sum()),
-        average_oee=float(oee),
+        plant_id=plant_id,
+        total_machines=n_machines,
+        total_production_today=int(df["production_count"].sum()),
+        average_oee=round(oee, 4),
         active_alerts=active_alerts,
         predicted_downtime_cost=downtime_cost,
-        timestamp=datetime.now()
+        timestamp=datetime.now(),
     )
 
+
 @app.get("/sensor-readings", response_model=List[SensorReadingOut])
-async def get_sensor_readings(hours: int = 24, machine_id: str = None, db: Session = Depends(get_db)):
-    """Get raw sensor readings for the last N hours, optionally filtered by machine"""
+async def get_sensor_readings(
+    hours: int = 24,
+    machine_id: str = None,
+    plant_id: str = "alpha",
+    db: Session = Depends(get_db),
+):
     cutoff = datetime.now() - timedelta(hours=hours)
-    query = db.query(SensorReading).filter(SensorReading.timestamp >= cutoff)
+    query = db.query(SensorReading).filter(
+        SensorReading.timestamp >= cutoff,
+        SensorReading.plant_id == plant_id,
+    )
     if machine_id:
         query = query.filter(SensorReading.machine_id == machine_id)
     return query.order_by(SensorReading.timestamp.desc()).limit(1000).all()
 
-@app.get("/maintenance-alerts", response_model=List[MaintenanceAlertOut])
-async def get_maintenance_alerts(db: Session = Depends(get_db)):
-    """Get all active maintenance alerts"""
 
-    alerts = db.query(MaintenanceAlert).filter(MaintenanceAlert.is_active == 1).all()
-    return alerts
+@app.get("/maintenance-alerts", response_model=List[MaintenanceAlertOut])
+async def get_maintenance_alerts(plant_id: str = "alpha", db: Session = Depends(get_db)):
+    return (
+        db.query(MaintenanceAlert)
+        .filter(MaintenanceAlert.plant_id == plant_id, MaintenanceAlert.is_active == 1)
+        .all()
+    )
+
 
 @app.get("/risk-analysis", response_model=List[MachineRiskOut])
-async def get_risk_analysis(db: Session = Depends(get_db)):
-    """
-    Per-machine dual-signal risk: XGBoost (supervised) + Isolation Forest (unsupervised).
-    Uses the last 6 sensor readings per machine for rolling-window features.
-    """
-    machine_ids = ["M1", "M2", "M3", "M4", "M5"]
+async def get_risk_analysis(plant_id: str = "alpha", db: Session = Depends(get_db)):
     results = []
 
-    for machine_id in machine_ids:
+    for machine_id in ["M1", "M2", "M3", "M4", "M5"]:
         rows = (
             db.query(SensorReading)
-            .filter(SensorReading.machine_id == machine_id)
+            .filter(
+                SensorReading.machine_id == machine_id,
+                SensorReading.plant_id == plant_id,
+            )
             .order_by(SensorReading.timestamp.desc())
             .limit(6)
             .all()
@@ -494,15 +547,15 @@ async def get_risk_analysis(db: Session = Depends(get_db)):
         if not rows:
             continue
 
-        # Most recent reading
         latest = rows[0]
-        # Older readings for rolling window (oldest-first)
-        recent = [(r.temperature, r.vibration, r.power_consumption)
-                  for r in reversed(rows[1:])]
+        recent = [
+            (r.temperature, r.vibration, r.power_consumption)
+            for r in reversed(rows[1:])
+        ]
 
         xgb_prob, _ = maintenance_predictor.predict_failure_probability(
             machine_id, latest.temperature, latest.vibration,
-            latest.power_consumption, db,
+            latest.power_consumption, db, plant_id,
         )
         if_score = anomaly_detector.score(
             machine_id, latest.temperature, latest.vibration,
@@ -511,6 +564,7 @@ async def get_risk_analysis(db: Session = Depends(get_db)):
 
         results.append(MachineRiskOut(
             machine_id=machine_id,
+            plant_id=plant_id,
             xgb_failure_probability=round(xgb_prob, 4),
             if_anomaly_score=round(if_score, 4),
             combined_risk=round(max(xgb_prob, if_score), 4),
@@ -524,30 +578,82 @@ async def get_risk_analysis(db: Session = Depends(get_db)):
 
 @app.post("/optimize-schedule", response_model=SchedulingRecommendationOut)
 async def optimize_production_schedule(job_ids: List[str], db: Session = Depends(get_db)):
-    """Get optimized job schedule to minimize changeovers"""
-    
-    # Fetch jobs from database
     jobs = db.query(ProductionJob).filter(ProductionJob.job_id.in_(job_ids)).all()
-    
     if not jobs:
         raise HTTPException(status_code=404, detail="No jobs found")
-    
-    job_dicts = [{'id': j.job_id, 'product_type': j.product_type} for j in jobs]
+    job_dicts = [{"id": j.job_id, "product_type": j.product_type} for j in jobs]
     optimized_order, time_saved = scheduler.optimize_job_order(job_dicts)
-    
     return SchedulingRecommendationOut(
         optimized_job_order=optimized_order,
         estimated_time_saved=time_saved,
-        changeover_reduction=5.2  # Placeholder
+        changeover_reduction=5.2,
     )
+
+# ============================================================================
+# ADMIN ENDPOINTS
+# ============================================================================
+
+@app.get("/admin/cross-plant", response_model=List[PlantSummaryOut])
+async def cross_plant_summary(
+    user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    results = []
+    cutoff = datetime.now() - timedelta(hours=24)
+
+    for plant in PLANTS:
+        readings = (
+            db.query(SensorReading)
+            .filter(SensorReading.plant_id == plant, SensorReading.timestamp >= cutoff)
+            .all()
+        )
+        alerts = (
+            db.query(MaintenanceAlert)
+            .filter(MaintenanceAlert.plant_id == plant, MaintenanceAlert.is_active == 1)
+            .count()
+        )
+
+        if not readings:
+            results.append(PlantSummaryOut(
+                plant_id=plant, total_machines=5, total_production_24h=0,
+                average_oee=0.0, active_alerts=alerts, avg_quality=0.0,
+            ))
+            continue
+
+        df = pd.DataFrame([
+            {
+                "machine_id": r.machine_id,
+                "production_count": r.production_count,
+                "downtime_minutes": r.downtime_minutes,
+                "quality_score": r.quality_score,
+            }
+            for r in readings
+        ])
+        n_machines = len(df["machine_id"].unique())
+        total_time = 24 * 60
+        availability = 1 - (df["downtime_minutes"].sum() / (total_time * n_machines))
+        performance = df["production_count"].sum() / (n_machines * 100)
+        quality = df["quality_score"].mean() / 100
+        oee = float(np.clip(availability * performance * quality, 0, 1))
+
+        results.append(PlantSummaryOut(
+            plant_id=plant,
+            total_machines=n_machines,
+            total_production_24h=int(df["production_count"].sum()),
+            average_oee=round(oee, 4),
+            active_alerts=alerts,
+            avg_quality=round(float(df["quality_score"].mean()), 2),
+        ))
+
+    return results
+
 
 @app.get("/")
 async def root():
-    """Welcome message"""
     return {
         "message": "Manufacturing Plant Digital Twin API",
         "docs": "/docs",
-        "version": "0.1.0"
+        "version": "0.2.0",
     }
 
 

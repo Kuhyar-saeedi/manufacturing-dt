@@ -3,11 +3,14 @@ Manufacturing Digital Twin - SCADA / OPC-UA Monitor
 Live view of the OPC-UA server address space, node IDs, and subscription feed.
 """
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
-import os
+from auth import require_auth, render_sidebar_user
 
 st.set_page_config(
     page_title="SCADA / OPC-UA | Manufacturing DT",
@@ -27,6 +30,9 @@ def get_api_base() -> str:
 
 
 API_BASE = get_api_base()
+
+require_auth()
+render_sidebar_user()
 
 # ============================================================================
 # LOAD DATA

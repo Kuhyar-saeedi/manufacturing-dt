@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
 import os
+from auth import require_auth, render_sidebar_user, get_auth_headers
 
 # ============================================================================
 # PAGE CONFIG
@@ -45,9 +46,13 @@ def get_api_base() -> str:
 
 API_BASE = get_api_base()
 
+require_auth()
+
 # ============================================================================
 # SIDEBAR: FILTERS & NAVIGATION
 # ============================================================================
+
+selected_plant = render_sidebar_user()
 
 st.sidebar.title("⚙️ Controls")
 selected_machine = st.sidebar.multiselect(
@@ -82,12 +87,12 @@ if st.sidebar.button("🚨 Maintenance Alerts", use_container_width=True):
 # ============================================================================
 
 @st.cache_data(ttl=60)
-def load_data(hours: int, api_base: str):
+def load_data(hours: int, api_base: str, plant_id: str = "alpha"):
     """Load sensor readings from FastAPI backend"""
     try:
         resp = requests.get(
             f"{api_base}/sensor-readings",
-            params={"hours": hours},
+            params={"hours": hours, "plant_id": plant_id},
             timeout=15
         )
         resp.raise_for_status()
@@ -105,7 +110,7 @@ def load_data(hours: int, api_base: str):
         return None
 
 with st.spinner("Loading factory data..."):
-    df = load_data(hours_back, API_BASE)
+    df = load_data(hours_back, API_BASE, selected_plant)
 
 if df is None:
     st.stop()

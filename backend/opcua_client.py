@@ -100,6 +100,7 @@ class _DataChangeHandler:
             self._ingest_fn(
                 db=db,
                 machine_id=machine_id,
+                plant_id="alpha",
                 temperature=float(buf.get("Temperature", 65.0)),
                 vibration=float(buf.get("Vibration", 2.5)),
                 power_consumption=float(buf.get("PowerConsumption", 15.0)),

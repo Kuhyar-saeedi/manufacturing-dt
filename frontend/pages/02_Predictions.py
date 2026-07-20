@@ -3,6 +3,9 @@ Manufacturing Digital Twin - Maintenance Predictions Page
 Shows predictive maintenance alerts and risk scores for equipment
 """
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 import streamlit as st
 import requests
 import pandas as pd
@@ -10,7 +13,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import os
+from auth import require_auth, render_sidebar_user, get_auth_headers
 
 st.set_page_config(
     page_title="Maintenance Alerts | Manufacturing DT",
@@ -29,23 +32,26 @@ def get_api_base() -> str:
 
 API_BASE = get_api_base()
 
+require_auth()
+selected_plant = render_sidebar_user()
+
 # ============================================================================
 # LOAD DATA
 # ============================================================================
 
 @st.cache_data(ttl=60)
-def load_risk_analysis(api_base: str):
+def load_risk_analysis(api_base: str, plant_id: str = "alpha"):
     try:
-        resp = requests.get(f"{api_base}/risk-analysis", timeout=15)
+        resp = requests.get(f"{api_base}/risk-analysis", params={"plant_id": plant_id}, timeout=15)
         resp.raise_for_status()
         return pd.DataFrame(resp.json())
     except Exception:
         return None
 
 @st.cache_data(ttl=60)
-def load_sensor_data(api_base: str):
+def load_sensor_data(api_base: str, plant_id: str = "alpha"):
     try:
-        resp = requests.get(f"{api_base}/sensor-readings", params={"hours": 24}, timeout=15)
+        resp = requests.get(f"{api_base}/sensor-readings", params={"hours": 24, "plant_id": plant_id}, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         if not data:
@@ -68,8 +74,8 @@ def calculate_risk_score(row):
     return min(temp_risk + vib_risk + power_risk + downtime_risk, 100)
 
 with st.spinner("Loading maintenance data..."):
-    df = load_sensor_data(API_BASE)
-    risk_df = load_risk_analysis(API_BASE)
+    df = load_sensor_data(API_BASE, selected_plant)
+    risk_df = load_risk_analysis(API_BASE, selected_plant)
 
 if df is None:
     st.warning("No data available. Make sure the backend is running.")

@@ -3,13 +3,16 @@ Manufacturing Digital Twin - Production Scheduling Optimizer
 Greedy nearest-neighbor job sequencing to minimize changeover time
 """
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import os
+from auth import require_auth, render_sidebar_user
 
 st.set_page_config(
     page_title="Scheduler | Manufacturing DT",
@@ -27,6 +30,9 @@ def get_api_base() -> str:
         return os.environ.get("API_BASE", "http://localhost:8000")
 
 API_BASE = get_api_base()
+
+require_auth()
+selected_plant = render_sidebar_user()
 
 # ============================================================================
 # CONSTANTS

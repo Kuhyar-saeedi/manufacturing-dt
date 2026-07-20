@@ -3,6 +3,9 @@ Manufacturing Digital Twin - Analytics & Reports
 Historical trends, OEE breakdown, quality/energy analysis, and data export
 """
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 import streamlit as st
 import requests
 import pandas as pd
@@ -11,7 +14,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import io
-import os
+from auth import require_auth, render_sidebar_user, get_auth_headers
 
 st.set_page_config(
     page_title="Reports | Manufacturing DT",
@@ -30,14 +33,17 @@ def get_api_base() -> str:
 
 API_BASE = get_api_base()
 
+require_auth()
+selected_plant = render_sidebar_user()
+
 # ============================================================================
 # DATA LOADING
 # ============================================================================
 
 @st.cache_data(ttl=300)
-def load_all_data(api_base: str):
+def load_all_data(api_base: str, plant_id: str = "alpha"):
     try:
-        resp = requests.get(f"{api_base}/sensor-readings", params={"hours": 48}, timeout=15)
+        resp = requests.get(f"{api_base}/sensor-readings", params={"hours": 48, "plant_id": plant_id}, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         if not data:
@@ -67,7 +73,7 @@ def calculate_oee(df: pd.DataFrame) -> dict:
     }
 
 with st.spinner("Loading analytics data..."):
-    df_raw = load_all_data(API_BASE)
+    df_raw = load_all_data(API_BASE, selected_plant)
 
 if df_raw is None:
     st.warning("No data available. Make sure the backend is running.")
