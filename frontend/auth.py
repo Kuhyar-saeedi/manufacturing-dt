@@ -46,17 +46,27 @@ def _do_login(username: str, password: str) -> bool:
 def _show_login():
     _, col, _ = st.columns([1, 2, 1])
     with col:
-        st.markdown("## Login")
-        with st.form("login_form"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Login", use_container_width=True)
-        if submitted:
-            if _do_login(username, password):
+        st.markdown("## Manufacturing DT — Demo Login")
+        st.markdown("**Quick access — click to enter instantly:**")
+        c1, c2 = st.columns(2)
+        if c1.button("Login as Admin", use_container_width=True, type="primary"):
+            if _do_login("admin", "admin"):
                 st.rerun()
-            else:
-                st.error("Invalid credentials")
-        st.info("Demo: `admin / admin` (all plants)  |  `operator / operator` (Plant Alpha)")
+        if c2.button("Login as Operator", use_container_width=True):
+            if _do_login("operator", "operator"):
+                st.rerun()
+        st.markdown("---")
+        with st.expander("Manual login"):
+            with st.form("login_form"):
+                username = st.text_input("Username")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Login", use_container_width=True)
+            if submitted:
+                if _do_login(username, password):
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials")
+        st.caption("Admin: all 3 plants + admin dashboard  |  Operator: Plant Alpha only")
 
 
 def require_auth():
