@@ -189,6 +189,20 @@ class OPCStatusOut(BaseModel):
     nodes: List[OPCNodeInfo]
     readings_received: int
 
+class RULForecastPoint(BaseModel):
+    timestamp: datetime
+    rul_hours: float
+    rul_lower: float
+    rul_upper: float
+
+class RULSummaryOut(BaseModel):
+    machine_id: str
+    plant_id: str
+    rul_hours: float
+    rul_lower: float
+    rul_upper: float
+    risk_level: str
+
 # ============================================================================
 # ML MODELS
 # ============================================================================
@@ -232,15 +246,11 @@ class MaintenancePredictor:
             risk_score = (vibration / 10.0) * 0.5 + (temperature / 80.0) * 0.5
             failure_prob = min(risk_score, 1.0)
 
-        if failure_prob > 0.8:
-            days = np.random.uniform(1, 2)
-        elif failure_prob > 0.6:
-            days = np.random.uniform(2, 5)
-        elif failure_prob > 0.4:
-            days = np.random.uniform(5, 10)
-        else:
-            days = np.random.uniform(10, 30)
-
+        rul_hours, _, _ = rul_predictor.predict(
+            machine_id, temperature, vibration, power_consumption,
+            recent if db is not None else [],
+        )
+        days = rul_hours / 24.0
         return failure_prob, days
 
 
@@ -265,6 +275,33 @@ class AnomalyDetector:
         if spread == 0:
             return 0.0
         return float(np.clip((self.score_max - raw) / spread, 0.0, 1.0))
+
+
+class RULPredictor:
+    NORMAL_RUL_CAP = 72.0   # hours — matches train_models.NORMAL_RUL_CAP
+    CONFIDENCE_PCT  = 0.20  # ±20% band
+
+    def __init__(self):
+        try:
+            artifact = joblib.load("rul_model.joblib")
+            self.model          = artifact["model"]
+            self.normal_rul_cap = artifact.get("normal_rul_cap", self.NORMAL_RUL_CAP)
+            print("✅ XGBoost RUL model loaded")
+        except FileNotFoundError:
+            self.model = None
+            print("⚠️  rul_model.joblib not found — RUL will use heuristic fallback")
+
+    def predict(self, machine_id: str, temp: float, vib: float, power: float, recent: list) -> tuple[float, float, float]:
+        """Returns (rul_hours, lower_bound, upper_bound)."""
+        if self.model is not None:
+            feats = compute_features(machine_id, temp, vib, power, recent)
+            rul = float(np.clip(self.model.predict(feats)[0], 1.0, self.normal_rul_cap))
+        else:
+            risk = min((vib / 10.0) * 0.5 + (temp / 80.0) * 0.5, 1.0)
+            rul = max(self.NORMAL_RUL_CAP * (1.0 - risk), 1.0)
+
+        band = max(rul * self.CONFIDENCE_PCT, 1.0)
+        return round(rul, 2), round(max(rul - band, 0.5), 2), round(rul + band, 2)
 
 
 class ProductionScheduler:
@@ -399,6 +436,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+rul_predictor = RULPredictor()
 maintenance_predictor = MaintenancePredictor()
 anomaly_detector = AnomalyDetector()
 scheduler = ProductionScheduler()
@@ -588,6 +626,99 @@ async def optimize_production_schedule(job_ids: List[str], db: Session = Depends
         estimated_time_saved=time_saved,
         changeover_reduction=5.2,
     )
+
+# ============================================================================
+# RUL FORECAST ENDPOINTS
+# ============================================================================
+
+@app.get("/rul-forecast/{machine_id}", response_model=List[RULForecastPoint])
+async def get_rul_forecast(
+    machine_id: str,
+    plant_id: str = "alpha",
+    hours: int = 48,
+    db: Session = Depends(get_db),
+):
+    """Return per-reading RUL estimates over the past `hours` for one machine."""
+    cutoff = datetime.now() - timedelta(hours=hours)
+    rows = (
+        db.query(SensorReading)
+        .filter(
+            SensorReading.machine_id == machine_id,
+            SensorReading.plant_id == plant_id,
+            SensorReading.timestamp >= cutoff,
+        )
+        .order_by(SensorReading.timestamp.asc())
+        .all()
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="No data for this machine/plant")
+
+    points: list[RULForecastPoint] = []
+    history: list[tuple[float, float, float]] = []
+    for r in rows:
+        rul, lower, upper = rul_predictor.predict(
+            machine_id, r.temperature, r.vibration, r.power_consumption, history
+        )
+        points.append(RULForecastPoint(
+            timestamp=r.timestamp,
+            rul_hours=rul,
+            rul_lower=lower,
+            rul_upper=upper,
+        ))
+        history.append((r.temperature, r.vibration, r.power_consumption))
+        if len(history) > 50:
+            history.pop(0)
+
+    return points
+
+
+@app.get("/rul-summary", response_model=List[RULSummaryOut])
+async def get_rul_summary(plant_id: str = "alpha", db: Session = Depends(get_db)):
+    """Return current RUL estimate for every machine in a plant."""
+    results: list[RULSummaryOut] = []
+    for machine_id in ["M1", "M2", "M3", "M4", "M5"]:
+        rows = (
+            db.query(SensorReading)
+            .filter(
+                SensorReading.machine_id == machine_id,
+                SensorReading.plant_id == plant_id,
+            )
+            .order_by(SensorReading.timestamp.desc())
+            .limit(6)
+            .all()
+        )
+        if not rows:
+            continue
+
+        latest = rows[0]
+        recent = [
+            (r.temperature, r.vibration, r.power_consumption)
+            for r in reversed(rows[1:])
+        ]
+        rul, lower, upper = rul_predictor.predict(
+            machine_id, latest.temperature, latest.vibration,
+            latest.power_consumption, recent,
+        )
+
+        if rul <= 12:
+            risk_level = "CRITICAL"
+        elif rul <= 24:
+            risk_level = "HIGH"
+        elif rul <= 48:
+            risk_level = "MEDIUM"
+        else:
+            risk_level = "GOOD"
+
+        results.append(RULSummaryOut(
+            machine_id=machine_id,
+            plant_id=plant_id,
+            rul_hours=rul,
+            rul_lower=lower,
+            rul_upper=upper,
+            risk_level=risk_level,
+        ))
+    return results
+
 
 # ============================================================================
 # ADMIN ENDPOINTS

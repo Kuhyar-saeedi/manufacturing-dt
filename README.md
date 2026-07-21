@@ -6,7 +6,7 @@
 [![Backend API](https://img.shields.io/badge/Backend%20API-Railway-0B0D0E?logo=railway&logoColor=white)](https://manufacturing-dt-production.up.railway.app/docs)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![XGBoost](https://img.shields.io/badge/XGBoost-92.4%25%20TPR-F7931E)](https://xgboost.readthedocs.io)
+[![XGBoost](https://img.shields.io/badge/XGBoost-92.4%25%20TPR%20%7C%20RUL%20MAE%2015h-F7931E)](https://xgboost.readthedocs.io)
 
 A full-stack Industry 4.0 digital twin that predicts equipment failures, visualizes factory floor status, and optimizes production scheduling using machine learning and real-time sensor data.
 
@@ -367,8 +367,8 @@ Run both services locally as described in "Running the Project" section.
 - [x] **Phase 3**: Trained XGBoost maintenance predictor — 92.4% TPR, 0.92 PR-AUC; latent health-state labels; deployed on Railway
 - [x] **Phase 4**: Isolation Forest anomaly detector (unsupervised) — dual-signal risk dashboard; `/risk-analysis` endpoint; committed artifact deployed on Railway
 - [x] **Phase 5**: OPC-UA SCADA integration — in-process asyncua server + subscription bridge; 30-node address space (5 machines × 6 tags); `/opcua-status` endpoint; SCADA monitor page with node-ID reference table
-- [ ] **Phase 6**: Multi-plant support, admin dashboard, role-based access
-- [ ] **Phase 7**: Time-series RUL forecasting (Prophet / ARIMA)
+- [x] **Phase 6**: Multi-plant support (alpha/beta/gamma), JWT auth, role-based access; admin cross-plant dashboard; one-click demo login
+- [x] **Phase 7**: XGBoost RUL regressor — replaces placeholder `days_to_failure` with real per-reading regression (MAE 15 h on 0–72 h range); `/rul-forecast/{machine_id}` + `/rul-summary` endpoints; degradation trend chart with confidence bands
 
 ---
 
