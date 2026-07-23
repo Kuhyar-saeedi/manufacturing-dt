@@ -133,6 +133,13 @@ if not selected_machines:
 fig = go.Figure()
 palette = ["#EF553B", "#636EFA", "#00CC96", "#AB63FA", "#FFA15A"]
 
+
+def hex_to_rgba(hex_color, alpha):
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
 for idx, mid in enumerate(selected_machines):
     fc = load_rul_forecast(API_BASE, mid, selected_plant, lookback_h)
     if fc is None or fc.empty:
@@ -145,7 +152,7 @@ for idx, mid in enumerate(selected_machines):
         x=pd.concat([fc["timestamp"], fc["timestamp"].iloc[::-1]]),
         y=pd.concat([fc["rul_upper"], fc["rul_lower"].iloc[::-1]]),
         fill="toself",
-        fillcolor=color.replace(")", ", 0.12)").replace("rgb(", "rgba(") if color.startswith("rgb") else color + "20",
+        fillcolor=hex_to_rgba(color, 0.12),
         line=dict(width=0),
         showlegend=False,
         hoverinfo="skip",
